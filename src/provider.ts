@@ -56,7 +56,7 @@ export function createModelDiscovery(baseUrl: string): NonNullable<ProviderConfi
     try {
       // The registry accepts remoteCompaction on dynamic rows even though the
       // extension SDK's ProviderModelConfig does not expose it yet.
-      const models: (ProviderModelConfig & { remoteCompaction?: { v2StreamingEnabled: true } })[] = [];
+      const models: (ProviderModelConfig & { remoteCompaction: { v2StreamingEnabled: true } })[] = [];
       for (const row of list.data) {
         if (Object.hasOwn(UNSUPPORTED_RESPONSES_IDS, row.id)) continue;
         const metadata = metadataFromCatalog(catalog, row.owned_by || undefined, row.id, {
@@ -72,9 +72,8 @@ export function createModelDiscovery(baseUrl: string): NonNullable<ProviderConfi
           name: `${row.display_name ?? row.id}${!metadata.priced ? " (pricing unknown)" : metadata.referencePricing ? " (reference pricing)" : ""}`,
           api: "openai-responses",
           ...metadata.model,
-          // Only this route/model has verified compaction_trigger support.
           // Omit enabled: true, which would also opt into the unsupported V1 route.
-          ...(row.id === "gpt-6.2-sol" ? { remoteCompaction: { v2StreamingEnabled: true } } : {}),
+          remoteCompaction: { v2StreamingEnabled: true },
           compat: {
             supportsReasoningEffort: true,
             supportsReasoningParams: true,
