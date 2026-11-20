@@ -6,14 +6,11 @@ Derived from [shedaniel/nanaho-omp](https://github.com/shedaniel/nanaho-omp). Th
 
 ## Install and connect
 
-Use Bun **1.4.4**, which supports this repository's version-2 lockfile. Dependencies target omp **18.11.1**; real CLI discovery, session usage, and Responses streaming were also smoke-checked with omp **18.16.0**.
-
 ```sh
-bun install --frozen-lockfile
-omp --extension .
+omp plugin install github:shedaniel/nanaho-proxy-omp
 ```
 
-Inside omp:
+Start or restart omp, then run:
 
 ```text
 /login nanaho-proxy
@@ -26,13 +23,7 @@ The endpoint is saved in omp's native `nanaho-proxy-omp.baseUrl` plugin setting.
 
 Choose a `nanaho-proxy/…` model through `/model`. If you already have a saved login but no models appear, run `/nanaho-proxy setup` to save the endpoint and discover models with that login without restarting. The same command changes the endpoint later. Catalog discovery does not guarantee inference availability: a listed model can still be unsupported by the Responses backend or have no usable upstream account. Check gateway availability rather than assuming a discovered ID is ready to generate; the extension does not invent replacement IDs or aliases.
 
-To keep the extension enabled across sessions, run from this directory:
-
-```sh
-omp plugin link .
-```
-
-Restart omp after changing extension source. The native endpoint setting and credentials persist across restarts. Before starting omp, the setting can also be managed with:
+The native endpoint setting and credentials persist across restarts. Before starting omp, the setting can also be managed with:
 
 ```sh
 omp plugin config set nanaho-proxy-omp baseUrl <gateway-api-url>
