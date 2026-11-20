@@ -5,6 +5,16 @@ import { loadBaseUrl, saveBaseUrl } from "./config";
 const PROVIDER = "nanaho-proxy";
 const HELP = "Nanaho Proxy: /nanaho-proxy setup to configure your endpoint; /login nanaho-proxy to enter an API key; /nanaho-proxy refresh; /model to select a model and see prices; /nanaho-proxy status; /nanaho-proxy usage for session tokens; /logout nanaho-proxy to remove saved keys.";
 
+type DiscoveryOutcome = { status: "idle" | "pending" | "ready" | "unauthenticated" } | { status: "failed"; error: string };
+
+function discoveryError(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  // Only our fixed callback errors are safe to display; host/network errors can contain secrets.
+  if (/^Nanaho Proxy (?:model list|models\.dev catalog) (?:request failed(?: \(HTTP \d{3}\))?|response is not valid JSON|response has invalid data)\.$/.test(message)
+    || message === "Nanaho Proxy models.dev catalog contains invalid model metadata.") return message;
+  return "Nanaho Proxy model discovery failed. Check gateway availability and run /nanaho-proxy refresh.";
+}
+
 function show(pi: ExtensionAPI, ctx: ExtensionContext, text: string): void {
   if (ctx.hasUI) {
     ctx.ui.notify(text, "info");
@@ -41,6 +51,9 @@ function usageText(ctx: ExtensionContext): string {
 
 export default async function nanahoProxy(pi: ExtensionAPI): Promise<void> {
   let baseUrl = await loadBaseUrl(process.cwd());
+  let discovery: DiscoveryOutcome = { status: "idle" };
+  let registration: object | undefined;
+  let endpointChanged = false;
   const providerConfig: ProviderConfig = {
     // Only configure the fallback when it exists; unresolved key strings can be literals.
     ...(process.env.NANAHO_PROXY_API_KEY?.trim() ? { apiKey: "NANAHO_PROXY_API_KEY" } : {}),
@@ -69,17 +82,79 @@ export default async function nanahoProxy(pi: ExtensionAPI): Promise<void> {
   };
 
   function register(): void {
+    endpointChanged = registration !== undefined;
+    registration = {};
+    const currentRegistration = registration;
+    discovery = { status: "idle" };
+    const discover = baseUrl ? createModelDiscovery(baseUrl) : undefined;
     pi.registerProvider(PROVIDER, {
       ...providerConfig,
-      ...(baseUrl ? {
+      ...(baseUrl && discover ? {
         baseUrl,
         api: "openai-responses" as const,
         authHeader: true,
-        fetchDynamicModels: createModelDiscovery(baseUrl),
+        fetchDynamicModels: async (apiKey: string | undefined) => {
+          const attempt: DiscoveryOutcome = { status: "pending" };
+          if (registration === currentRegistration) discovery = attempt;
+          try {
+            const models = await discover(apiKey);
+            if (registration === currentRegistration && discovery === attempt) {
+              discovery = { status: apiKey ? "ready" : "unauthenticated" };
+            }
+            return models;
+          } catch (error) {
+            const message = discoveryError(error);
+            if (registration === currentRegistration && discovery === attempt) discovery = { status: "failed", error: message };
+            // The host can swallow callback failures while retaining cached or bundled models.
+            throw new Error(message);
+          }
+        },
       } : {}),
     });
   }
   register();
+
+  function discoveryText(ctx: ExtensionContext): string {
+    const count = ctx.modelRegistry.getProviderModels(PROVIDER).length;
+    const models = `Models: ${count} loaded (prices from models.dev; see /model).`;
+    const state = ctx.modelRegistry.getProviderDiscoveryState(PROVIDER);
+    let status: string;
+    if (!baseUrl) status = "not configured — run /nanaho-proxy setup.";
+    else if (discovery.status === "pending") status = "pending — live discovery is in progress.";
+    else if (discovery.status === "failed") status = `failed: ${discovery.error}`;
+    else if (discovery.status === "unauthenticated" || !ctx.modelRegistry.authStorage.keys.source(PROVIDER)) {
+      status = "API key not configured — run /login nanaho-proxy.";
+    } else if (endpointChanged && discovery.status === "idle") {
+      // The host can still hold discovery state from the previous endpoint.
+      status = "pending — no live discovery has completed for this endpoint.";
+    } else if (state?.error) status = `failed: ${discoveryError(state.error)}`;
+    else if (state?.status === "cached") status = state.stale
+      ? "using stale cached models; live discovery is unavailable. Run /nanaho-proxy refresh."
+      : "using cached models; run /nanaho-proxy refresh for a live update.";
+    else if (state?.status === "unavailable") status = "unavailable; loaded models, if any, are not a successful live refresh. Run /nanaho-proxy refresh.";
+    else if (state?.status === "unauthenticated") status = "authentication unavailable — run /login nanaho-proxy.";
+    else if (state?.status === "empty") status = "live discovery returned no supported Responses chat models.";
+    else if (state?.status === "ok" || discovery.status === "ready") status = count > 0
+      ? "live discovery completed."
+      : "live discovery returned no supported Responses chat models.";
+    else status = "pending — live discovery has not completed. Run /nanaho-proxy refresh.";
+    return `Discovery: ${status}\n${models}`;
+  }
+
+  async function refresh(ctx: ExtensionContext): Promise<void> {
+    const currentRegistration = registration;
+    const attempt: DiscoveryOutcome = { status: "pending" };
+    discovery = attempt;
+    try {
+      await ctx.modelRegistry.refreshProvider(PROVIDER, "online");
+      if (registration === currentRegistration && discovery === attempt) {
+        discovery = { status: "idle" };
+        endpointChanged = false;
+      }
+    } catch (error) {
+      if (registration === currentRegistration) discovery = { status: "failed", error: discoveryError(error) };
+    }
+  }
 
   async function setup(ctx: ExtensionContext): Promise<void> {
     if (!ctx.hasUI) {
@@ -94,9 +169,8 @@ export default async function nanahoProxy(pi: ExtensionAPI): Promise<void> {
       show(pi, ctx, "Nanaho Proxy endpoint saved. Run /login nanaho-proxy to enter your API key.");
       return;
     }
-    await ctx.modelRegistry.refreshProvider(PROVIDER, "online");
-    const state = ctx.modelRegistry.getProviderDiscoveryState(PROVIDER);
-    show(pi, ctx, state?.error ? `Nanaho Proxy discovery failed: ${state.error}` : `Nanaho Proxy endpoint saved: ${ctx.modelRegistry.getProviderModels(PROVIDER).length} models loaded. Open /model to select one.`);
+    await refresh(ctx);
+    show(pi, ctx, `Nanaho Proxy endpoint saved.\n${discoveryText(ctx)}`);
   }
 
   pi.on("session_start", (_event, ctx) => {
@@ -122,9 +196,8 @@ export default async function nanahoProxy(pi: ExtensionAPI): Promise<void> {
           show(pi, ctx, "Nanaho Proxy endpoint is not configured. Run /nanaho-proxy setup first.");
           return;
         }
-        await ctx.modelRegistry.refreshProvider(PROVIDER, "online");
-        const state = ctx.modelRegistry.getProviderDiscoveryState(PROVIDER);
-        show(pi, ctx, state?.error ? `Nanaho Proxy refresh failed: ${state.error}` : `Nanaho Proxy refreshed: ${ctx.modelRegistry.getProviderModels(PROVIDER).length} models loaded.`);
+        await refresh(ctx);
+        show(pi, ctx, `Nanaho Proxy\n${discoveryText(ctx)}`);
         return;
       }
       if (action === "usage") {
@@ -133,7 +206,7 @@ export default async function nanahoProxy(pi: ExtensionAPI): Promise<void> {
       }
       if (action === "status") {
         const configured = ctx.modelRegistry.authStorage.keys.source(PROVIDER) !== undefined;
-        show(pi, ctx, `Nanaho Proxy\nAPI key: ${configured ? "configured" : "not configured"}.\nResponses endpoint: ${baseUrl ?? "not configured — run /nanaho-proxy setup"}\nModels: ${ctx.modelRegistry.getProviderModels(PROVIDER).length} loaded (prices from models.dev; see /model).\n${HELP}`);
+        show(pi, ctx, `Nanaho Proxy\nAPI key: ${configured ? "configured" : "not configured"}.\nResponses endpoint: ${baseUrl ?? "not configured — run /nanaho-proxy setup"}\n${discoveryText(ctx)}\n${HELP}`);
         return;
       }
       if (action || !ctx.hasUI || ctx.mode !== "tui") {

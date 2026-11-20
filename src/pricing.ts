@@ -1,5 +1,6 @@
 import type { ProviderModelConfig } from "@oh-my-pi/pi-coding-agent";
-import type { ModelCost } from "@oh-my-pi/pi-ai/types";
+import { MODEL_KINDS, type ModelCost, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import { isLikelyAimlApiChatModelId } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { z } from "zod";
 
 export const ModelsDevCatalog = z.record(z.string(), z.object({ models: z.record(z.string(), z.unknown()) }));
@@ -11,24 +12,46 @@ const TokenCost = z.object({
   cache_read: z.number().nonnegative().optional(),
   cache_write: z.number().nonnegative().optional(),
 });
+const CatalogLimits = z.object({ context: z.number().nonnegative(), output: z.number().nonnegative() });
+const ChatLimits = CatalogLimits.extend({ context: z.number().positive() });
 const CatalogModel = z.object({
   cost: TokenCost.extend({
     tiers: z.array(TokenCost.extend({
       tier: z.object({ type: z.string(), size: z.number().positive() }),
     })).optional(),
   }).optional(),
-  limit: z.object({ context: z.number().positive(), output: z.number().nonnegative() }).optional(),
-  modalities: z.object({ input: z.array(z.string()) }).optional(),
+  limit: CatalogLimits.optional(),
+  kind: z.enum(MODEL_KINDS).optional(),
+  modalities: z.object({ input: z.array(z.string()), output: z.array(z.string()).optional() }).optional(),
   reasoning: z.boolean().optional(),
 });
 
-export function metadataFromCatalog(catalog: ModelsDevCatalog, provider: string | undefined, id: string): {
-  model: Pick<ProviderModelConfig, "contextWindow" | "maxTokens" | "input" | "reasoning"> & { cost: ModelCost };
-  priced: boolean;
-} {
+function chatCapability(kind: ModelKind | undefined, output: readonly string[] | undefined): boolean | undefined {
+  if (kind !== undefined) return kind === "chat";
+  if (output?.length) return output.some(modality => modality.toLowerCase() === "text");
+  return undefined;
+}
+
+export function metadataFromCatalog(
+  catalog: ModelsDevCatalog,
+  provider: string | undefined,
+  id: string,
+  capabilities: { kind?: ModelKind; output?: readonly string[] } = {},
+): { priced: boolean } & (
+  | { chat: false }
+  | { chat: true; model: Pick<ProviderModelConfig, "contextWindow" | "maxTokens" | "input" | "reasoning"> & { cost: ModelCost } }
+) {
   const raw = provider === undefined ? undefined : catalog[provider]?.models[id];
   const entry = raw === undefined ? undefined : CatalogModel.parse(raw);
   const rates = entry?.cost;
+  // Classify separately from pricing: gateway facts win, while prices always
+  // require the exact owner/id match above. ID heuristics never supply prices.
+  const chat = chatCapability(capabilities.kind, capabilities.output)
+    ?? chatCapability(entry?.kind, entry?.modalities?.output)
+    ?? isLikelyAimlApiChatModelId(id);
+  if (!chat) return { chat: false, priced: rates !== undefined };
+  // Zero context is valid for image/runner metadata, not a chat token window.
+  const limits = entry?.limit === undefined ? undefined : ChatLimits.parse(entry.limit);
   const cost: ModelCost = {
     input: rates?.input ?? 0,
     output: rates?.output ?? 0,
@@ -46,11 +69,12 @@ export function metadataFromCatalog(catalog: ModelsDevCatalog, provider: string 
     };
   }
   return {
+    chat: true,
     priced: rates !== undefined,
     model: {
       cost,
-      contextWindow: entry?.limit?.context ?? 128_000,
-      maxTokens: entry?.limit?.output || 16_384,
+      contextWindow: limits?.context ?? 128_000,
+      maxTokens: limits?.output || 16_384,
       input: entry?.modalities?.input.includes("image") ? ["text", "image"] : ["text"],
       reasoning: entry?.reasoning ?? true,
     },

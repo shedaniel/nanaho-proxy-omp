@@ -9,17 +9,33 @@ const catalog = ModelsDevCatalog.parse({
         tiers: [{ input: 6, output: 13.5, tier: { type: "context", size: 250_000 } }],
       },
       limit: { context: 1_000_000, output: 64_000 },
-      modalities: { input: ["text", "image", "pdf"] },
+      modalities: { input: ["text", "image", "pdf"], output: ["text"] },
       reasoning: true,
     },
     "free-model": { cost: { input: 0, output: 0 } },
     "bad-price": { cost: { input: -1, output: 2 } },
+    "gpt-image-2": {
+      cost: { input: 8, output: 30, cache_read: 2 },
+      limit: { context: 0, output: 0 },
+      modalities: { input: ["text", "image"], output: ["image"] },
+    },
+    "opaque-renderer": { kind: "image", limit: { context: 0, output: 0 } },
+    "opaque-raster": {
+      cost: { input: 2, output: 4 }, limit: { context: 0, output: 0 },
+      modalities: { input: ["text"], output: ["image"] },
+    },
+    "bad-chat-context": {
+      cost: { input: 1, output: 2 }, limit: { context: 0, output: 16_384 },
+      modalities: { input: ["text"], output: ["text"] },
+    },
+    "bad-image-price": { kind: "image", cost: { input: -1, output: 2 }, limit: { context: 0, output: 0 } },
   } },
   other: { models: { "example-model": { cost: { input: 99, output: 99 } } } },
 });
 
 test("preserves per-million units, cache rates, and context-tier prices without mixing providers", () => {
   const result = metadataFromCatalog(catalog, "openai", "example-model");
+  if (!result.chat) throw new Error("Expected chat metadata");
   expect(result.model.cost).toEqual({
     input: 3, output: 9, cacheRead: 0.25, cacheWrite: 4,
     longContext: { inputThreshold: 250_000, input: 6, output: 13.5, cacheRead: 0.25, cacheWrite: 4 },
@@ -42,4 +58,19 @@ test("published zero prices remain distinct from missing prices", () => {
 
 test("invalid rate cards are rejected rather than displaying free usage", () => {
   expect(() => metadataFromCatalog(catalog, "openai", "bad-price")).toThrow();
+});
+
+test("zero-context image metadata is valid but never represented as a chat model", () => {
+  expect(metadataFromCatalog(catalog, "openai", "gpt-image-2")).toEqual({ chat: false, priced: true });
+  expect(metadataFromCatalog(catalog, "openai", "opaque-renderer")).toEqual({ chat: false, priced: false });
+  expect(metadataFromCatalog(catalog, "openai", "opaque-raster")).toEqual({ chat: false, priced: true });
+  expect(metadataFromCatalog(catalog, "openai", "gpt-image-2-landscape")).toEqual({ chat: false, priced: false });
+});
+
+test("zero context is still invalid for an explicitly conversational model", () => {
+  expect(() => metadataFromCatalog(catalog, "openai", "bad-chat-context")).toThrow();
+});
+
+test("non-chat classification does not hide malformed rate cards", () => {
+  expect(() => metadataFromCatalog(catalog, "openai", "bad-image-price")).toThrow();
 });

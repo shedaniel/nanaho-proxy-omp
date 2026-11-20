@@ -53,8 +53,8 @@ A saved Nanaho Proxy login takes precedence over the environment key. `/logout n
 | --- | --- |
 | `/nanaho-proxy` | Open the setup menu; the API-key action prepares `/login nanaho-proxy` in the composer |
 | `/nanaho-proxy setup` | Save the native endpoint setting and discover models using the existing login |
-| `/nanaho-proxy status` | Show key presence, endpoint, and loaded model count without printing the key |
-| `/nanaho-proxy refresh` | Reload gateway models and current models.dev metadata |
+| `/nanaho-proxy status` | Show key presence, endpoint, loaded model count, and live/cached/pending/failed discovery status without printing the key |
+| `/nanaho-proxy refresh` | Request live gateway models and current models.dev metadata, reporting discovery failures even when omp retains cached models |
 | `/nanaho-proxy usage` | Show recorded token usage on the current session branch and explain unavailable account billing |
 | `/model` | Select a model and inspect registered models.dev pricing |
 | `/usage` | Open omp's native provider usage view; Nanaho Proxy does not register an account-usage provider |
@@ -63,11 +63,25 @@ A saved Nanaho Proxy login takes precedence over the environment key. `/logout n
 
 Discovery uses the standard `${baseUrl}/models` endpoint: `/v1/models` when the configured base URL ends in `/v1`. Its `data` array supplies model IDs and `owned_by`. Inference uses the standard Responses endpoint, `${baseUrl}/responses`, preserving streaming and reasoning support. No Sub2API-specific models manifest or extra capability query is assumed.
 
-[models.dev](https://models.dev/api.json) supplies pricing and model metadata only when both the gateway's `owned_by` and model ID match exactly. The extension does not borrow another provider's price, guess an alias, or infer gateway billing from catalog metadata. Published metadata supplies supported capabilities, limits, and token rates; models without an exact match remain explicitly unpriced. Refresh discovery after gateway or catalog changes with `/nanaho-proxy refresh`.
+[models.dev](https://models.dev/api.json) supplies pricing and model metadata only when both the gateway's `owned_by` and model ID match exactly. The extension does not borrow another provider's price, guess a pricing alias, or infer gateway billing from catalog metadata. Published metadata supplies supported capabilities, limits, and token rates; eligible chat models without an exact match remain explicitly unpriced. Refresh discovery after gateway or catalog changes with `/nanaho-proxy refresh`.
+
+The gateway can return a mixed chat/media catalog, but this provider registers only the supported Responses **chat** roster. Classification uses gateway kind/output metadata first, then exact-owner/model-ID catalog kind/output metadata. Explicit non-chat kinds and nonempty output lists that exclude text are filtered out; text-plus-image output remains eligible unless an explicit kind is non-chat. Without explicit classification, the existing catalog media-ID rules also exclude recognized media IDs and their suffixed variants. Remaining model IDs are registered exactly as advertised; classification does not borrow pricing from another model or provider. Valid non-chat entries with a zero context limit do not invalidate the chat roster; genuinely malformed metadata or pricing still fails discovery rather than being silently dropped. The extension does not expose separate image, audio, video, or embedding APIs.
 
 Unknown prices are labeled **“pricing unknown”** in model display names. omp 18.11.1 requires numeric cost fields and can label zero-valued picker rows “free”; those placeholder values do **not** mean an unpriced model is free. Check the model name/details. Session cost estimates are incomplete for unpriced models and are not account bills. Published zero rates remain distinct from unknown rates. Supported catalog rates use the standard token prices and first long-context tier.
 
-The gateway API key is used only for gateway requests, never for models.dev. Discovery failures are reported rather than replaced with fabricated model IDs, prices, or account data.
+The gateway API key is used only for gateway requests, never for models.dev. Discovery failures are reported rather than replaced with fabricated model IDs, prices, or account data. The extension retains sanitized callback failures before returning them to omp, because the host may retain cached or bundled models without exposing the original error. `/nanaho-proxy status`, `/nanaho-proxy refresh`, and `/nanaho-proxy setup` report that failure separately from the loaded count. A new attempt clears the previous failure, a successful result replaces it, and changing the endpoint resets the extension's discovery diagnostics. Unexpected host errors use a generic diagnostic rather than displaying raw upstream error text.
+
+Startup discovery remains host-managed and cache-aware; registration does not issue a separate online request. Status distinguishes cached models (including stale caches), discovery that has not completed, an empty supported-model result, unavailable discovery, and missing authentication. A loaded count alone is not evidence that a live refresh succeeded.
+
+## Troubleshooting discovery
+
+- If `/model` has no Nanaho Proxy models, run `/nanaho-proxy status`, then `/nanaho-proxy refresh`. Read the **Discovery** line, not just the model count. A discovery failure can leave zero models or previously cached models loaded.
+- A model-list HTTP 401/403 means the gateway rejected the inference key; use `/login nanaho-proxy` to replace it through the native masked prompt. Check the saved endpoint with `/nanaho-proxy setup` if it points to the wrong gateway.
+- A model-list or models.dev request failure means that source could not be fetched. Check network/gateway availability, then refresh. Invalid JSON, invalid response data, and malformed catalog metadata are errors, not a successful empty catalog; no guessed prices or model fallback are substituted.
+- Cached or pending status does not prove the gateway is reachable. Refresh requests an online discovery pass; setup also does so when a key already exists. Neither command adds retries or changes credential storage.
+- A successful empty supported-model result is distinct from a failure: the gateway may list only non-chat models. Review the gateway's supported Responses chat inventory rather than assuming every `/models` entry can be used in `/model`.
+
+When reporting a problem, share only the sanitized Discovery line and relevant model IDs. Do not share API keys, credential-store files, private gateway addresses, or raw gateway responses.
 
 ## Usage and account billing
 
@@ -86,7 +100,7 @@ bun test
 omp plugin install --dry-run .
 ```
 
-Runtime verification exercises the real `omp` CLI, not only unit tests. Live authenticated discovery and the session-usage command were checked; Responses streaming and token accounting were exercised against a local protocol server. Successful live inference still requires available upstream models/accounts.
+Runtime verification exercises the real `omp` CLI, not only unit tests. Live authenticated discovery, refresh/status, and the session-usage command were checked. A local mixed chat/image catalog verifies that valid zero-context image metadata leaves chat discovery intact; HTTP-failure and recovery runs verify retained diagnostics and error clearing. Responses streaming and token accounting were exercised against a local protocol server. Successful live inference still requires available upstream models/accounts.
 
 Keep local configuration and credentials outside committed files. `.env`, `.env.*`, `.omp/`, and `node_modules/` are ignored. Do not commit gateway documentation attachments or live credentials.
 
