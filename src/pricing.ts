@@ -32,24 +32,41 @@ function chatCapability(kind: ModelKind | undefined, output: readonly string[] |
   return undefined;
 }
 
+function catalogEntry(catalog: ModelsDevCatalog, provider: string | undefined, id: string): unknown {
+  if (provider === undefined || !Object.hasOwn(catalog, provider)) return undefined;
+  const models = catalog[provider]?.models;
+  return models && Object.hasOwn(models, id) ? models[id] : undefined;
+}
+
+function referenceEntry(catalog: ModelsDevCatalog, id: string): unknown {
+  const baseId = /^(gpt-.+)-daybreak-(?:blue|red)$/.exec(id)?.[1];
+  if (baseId !== undefined) return catalogEntry(catalog, "openai", baseId);
+  if (id === "deepseek/deepseek-v4.1-flash") {
+    return catalogEntry(catalog, "deepseek", "deepseek-flash");
+  }
+  return undefined;
+}
+
 export function metadataFromCatalog(
   catalog: ModelsDevCatalog,
   provider: string | undefined,
   id: string,
   capabilities: { kind?: ModelKind; output?: readonly string[] } = {},
-): { priced: boolean } & (
+): { priced: boolean; referencePricing?: boolean } & (
   | { chat: false }
   | { chat: true; model: Pick<ProviderModelConfig, "contextWindow" | "maxTokens" | "input" | "reasoning"> & { cost: ModelCost } }
 ) {
-  const raw = provider === undefined ? undefined : catalog[provider]?.models[id];
+  const exact = catalogEntry(catalog, provider, id);
+  const raw = exact === undefined ? referenceEntry(catalog, id) : exact;
   const entry = raw === undefined ? undefined : CatalogModel.parse(raw);
   const rates = entry?.cost;
-  // Classify separately from pricing: gateway facts win, while prices always
-  // require the exact owner/id match above. ID heuristics never supply prices.
+  const priced = rates !== undefined;
+  const pricing = { priced, ...(priced && exact === undefined ? { referencePricing: true } : {}) };
+  // Classify separately from pricing: gateway facts win, and ID heuristics never supply prices.
   const chat = chatCapability(capabilities.kind, capabilities.output)
     ?? chatCapability(entry?.kind, entry?.modalities?.output)
     ?? isLikelyAimlApiChatModelId(id);
-  if (!chat) return { chat: false, priced: rates !== undefined };
+  if (!chat) return { chat: false, ...pricing };
   // Zero context is valid for image/runner metadata, not a chat token window.
   const limits = entry?.limit === undefined ? undefined : ChatLimits.parse(entry.limit);
   const cost: ModelCost = {
@@ -70,7 +87,7 @@ export function metadataFromCatalog(
   }
   return {
     chat: true,
-    priced: rates !== undefined,
+    ...pricing,
     model: {
       cost,
       contextWindow: limits?.context ?? 128_000,

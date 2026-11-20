@@ -14,6 +14,13 @@ const ModelList = z.object({ data: z.array(z.object({
   architecture: z.object({ output_modalities: z.array(z.string()).optional() }).optional(),
 })) });
 
+// The gateway advertises these IDs but rejects them on /responses.
+const UNSUPPORTED_RESPONSES_IDS: Record<string, true> = {
+  "gpt-live": true,
+  "gpt-live-1": true,
+  "gpt-live-1-mini": true,
+};
+
 async function requestJson<T>(url: string, options: RequestInit, label: string, schema: z.ZodType<T>): Promise<T> {
   let response: Response;
   try {
@@ -47,8 +54,11 @@ export function createModelDiscovery(baseUrl: string): NonNullable<ProviderConfi
       requestJson("https://models.dev/api.json", { signal: options.signal, redirect: "error" }, "models.dev catalog", ModelsDevCatalog),
     ]);
     try {
-      const models: ProviderModelConfig[] = [];
+      // The registry accepts remoteCompaction on dynamic rows even though the
+      // extension SDK's ProviderModelConfig does not expose it yet.
+      const models: (ProviderModelConfig & { remoteCompaction?: { v2StreamingEnabled: true } })[] = [];
       for (const row of list.data) {
+        if (Object.hasOwn(UNSUPPORTED_RESPONSES_IDS, row.id)) continue;
         const metadata = metadataFromCatalog(catalog, row.owned_by || undefined, row.id, {
           kind: row.kind,
           output: row.output?.length ? row.output
@@ -59,9 +69,12 @@ export function createModelDiscovery(baseUrl: string): NonNullable<ProviderConfi
         if (!metadata.chat) continue;
         models.push({
           id: row.id,
-          name: `${row.display_name ?? row.id}${metadata.priced ? "" : " (pricing unknown)"}`,
+          name: `${row.display_name ?? row.id}${!metadata.priced ? " (pricing unknown)" : metadata.referencePricing ? " (reference pricing)" : ""}`,
           api: "openai-responses",
           ...metadata.model,
+          // Only this route/model has verified compaction_trigger support.
+          // Omit enabled: true, which would also opt into the unsupported V1 route.
+          ...(row.id === "gpt-6.2-sol" ? { remoteCompaction: { v2StreamingEnabled: true } } : {}),
           compat: {
             supportsReasoningEffort: true,
             supportsReasoningParams: true,

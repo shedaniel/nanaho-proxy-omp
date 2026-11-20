@@ -104,6 +104,13 @@ test("mixed chat and zero-context image catalogs retain exact chat prices withou
   }
 });
 
+test("hides rejected Responses IDs without hiding similarly named chat models", async () => {
+  const ids = ["gpt-live", "gpt-live-1", "gpt-live-1-mini", "gpt-live-notes"];
+  mockDiscovery(url => Response.json(url === catalogUrl ? catalog : { data: ids.map(id => ({ id })) }));
+  const models = await createModelDiscovery(baseUrl)(apiKey);
+  expect(models.map(model => model.id)).toEqual(["gpt-live-notes"]);
+});
+
 test("explicit gateway and catalog classifications take precedence over media-name heuristics", async () => {
   const data = [
     { id: "opaque-kind", kind: "image" },
